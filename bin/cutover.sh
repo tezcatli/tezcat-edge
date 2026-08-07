@@ -18,6 +18,7 @@
 #   prepare     network, directories, edge config  (no downtime)
 #   stage       confirm the new images are pullable (no downtime)
 #   swap        THE OUTAGE: old stack down, edge + app up, ludo cert, fragment in
+#   certs       convert pre-existing renewals to webroot   <- REQUIRED after swap
 #   verify      prove the result
 #   rollback    put the old stack back
 #
@@ -28,6 +29,8 @@ DOMAIN=ludo.tezcat.fr
 APEX=tezcat.fr
 APP_DIR="$HOME/opt/$APP"
 EDGE_DIR="$HOME/opt/edge"
+# Matches container_name in compose.yaml; the certbot deploy hook signals it.
+EDGE_CONTAINER=edge-nginx
 BACKUP_DIR="$HOME/backups"
 OLD_COMPOSE="$APP_DIR/docker-compose.prod.yml"
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -133,8 +136,8 @@ phase_stage() {
   grep -q '^IMAGE_TAG=.\+' "$APP_DIR/.env" || die "IMAGE_TAG is empty in $APP_DIR/.env"
   ok "compose.yml and .env present ($(grep '^IMAGE_TAG=' "$APP_DIR/.env"))"
 
-  docker info 2>/dev/null | grep -q 'ghcr.io' \
-    || warn "not logged in to ghcr.io — run: docker login ghcr.io -u <you>"
+  # Not a login check: packages built from a public repo pull anonymously, and
+  # `docker info` says nothing useful either way. Let the pull below be the test.
 
   # Pull now, while the old stack is still up. This is the slow part, and doing
   # it inside the outage window would stretch it by minutes.
@@ -188,6 +191,45 @@ phase_swap() {
   step "Outage over. Next: ./bin/cutover.sh verify"
 }
 
+phase_certs() {
+  step "Certs — convert any pre-existing renewal to webroot"
+
+  # `swap` issues the new app's certificate with --webroot, so that one is
+  # already correct. Certificates that predate the edge are the problem: they
+  # renew with the standalone authenticator and a pre_hook that stops the app's
+  # own nginx container by name. After the cutover that container no longer
+  # exists, so the hook fails — and standalone could not bind :80 anyway, since
+  # the edge now holds it. Nothing notices until the renewal window, roughly a
+  # month before expiry, and then the certificate simply expires.
+  local changed=0
+  for conf in /etc/letsencrypt/renewal/*.conf; do
+    [ -e "$conf" ] || continue
+    local name; name=$(basename "$conf" .conf)
+    if ! sudo grep -q '^authenticator = standalone' "$conf"; then
+      ok "$name already uses $(sudo grep -oP '^authenticator = \K.*' "$conf")"
+      continue
+    fi
+    sudo cp "$conf" "$conf.bak-$(date +%Y%m%d-%H%M%S)"
+    sudo sed -i \
+      -e "s#^authenticator = standalone#authenticator = webroot\nwebroot_path = $EDGE_DIR/certbot,#" \
+      -e "/^pre_hook = /d" -e "/^post_hook = /d" "$conf"
+    printf '[[webroot_map]]\n%s = %s\n' "$name" "$EDGE_DIR/certbot" | sudo tee -a "$conf" >/dev/null
+    ok "$name converted to webroot"
+    changed=1
+  done
+
+  # One hook for every certificate. A reload, never a restart: a reload that
+  # fails leaves nginx serving the certificate it already has, where a failed
+  # restart would take every app on the host down at once.
+  printf '#!/bin/sh\ndocker kill -s HUP %s\n' "$EDGE_CONTAINER" \
+    | sudo tee /etc/letsencrypt/renewal-hooks/deploy/reload-edge.sh >/dev/null
+  sudo chmod +x /etc/letsencrypt/renewal-hooks/deploy/reload-edge.sh
+  ok "deploy hook installed"
+
+  [ "$changed" = 1 ] && warn "run 'sudo certbot renew --dry-run' now — it takes a few minutes"
+  step "Next: ./bin/cutover.sh verify"
+}
+
 phase_verify() {
   step "Verify"
   local base="https://$DOMAIN/$APP/"
@@ -225,6 +267,6 @@ phase_rollback() {
 }
 
 case "${1:-}" in
-  preflight|backup|prepare|stage|swap|verify|rollback) "phase_${1}" ;;
+  preflight|backup|prepare|stage|swap|certs|verify|rollback) "phase_${1}" ;;
   *) sed -n '2,25p' "$0" | sed 's/^#//'; exit 1 ;;
 esac
