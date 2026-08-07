@@ -135,6 +135,12 @@ Two writers share this directory, so the prefix decides ownership:
 app until each redeployed. `deploy-edge.yml` copies its files individually and prints the
 surviving `1*.conf` list afterwards as a standing assertion.
 
+**`deploy-edge.yml` needs its own copies of the four `DEPLOY_*` secrets, in *this* repo.**
+`deploy-app.yml` is reusable and therefore runs in the calling app's context, inheriting that
+repo's secrets; this one is dispatched here and inherits nothing. They are the same four
+values listed under [Secrets](#secrets), and the workflow fails with a named error if any is
+missing rather than letting `ssh` print its usage at you.
+
 A change to this repo is **not** picked up by an app's deploy. An app deploy reloads the
 edge, but only ships its own fragment. Editing `02-apex.conf` and waiting for an app deploy
 to apply it is a real mistake that has already happened once — run `deploy-edge.yml`.

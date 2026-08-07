@@ -32,6 +32,27 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # deploy-app.yml is *reusable*, so it runs in the calling app's context and
+      # inherits that repo's secrets. This workflow runs in this repo's own
+      # context and inherits nothing — the DEPLOY_* values have to exist here
+      # too. Without this check the first ssh gets a bare "@" for a destination
+      # and prints its usage, which says nothing about the actual cause.
+      - name: Check the deploy secrets exist in this repo
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -n "${{ secrets.DEPLOY_HOST }}" ]        || missing+=(DEPLOY_HOST)
+          [ -n "${{ secrets.DEPLOY_USER }}" ]        || missing+=(DEPLOY_USER)
+          [ -n "${{ secrets.DEPLOY_SSH_KEY }}" ]     || missing+=(DEPLOY_SSH_KEY)
+          [ -n "${{ secrets.DEPLOY_KNOWN_HOSTS }}" ] || missing+=(DEPLOY_KNOWN_HOSTS)
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::missing repository secrets in tezcat-edge: ${missing[*]}"
+            echo "These are separate from the copies in each app repo: a reusable"
+            echo "workflow inherits its caller's secrets, but this one is dispatched"
+            echo "here and inherits nothing. Add them under Settings → Secrets."
+            exit 1
+          fi
+
       - name: Validate the config before it can reach the host
         run: |
           set -euo pipefail
