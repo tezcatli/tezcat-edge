@@ -98,6 +98,29 @@ sudo certbot certonly --webroot -w /home/user/opt/edge/certbot -d myapp.tezcat.f
 ssh user@tezcat.fr "docker exec edge-nginx nginx -t && docker kill -s HUP edge-nginx"
 ```
 
+## Migrating an existing single-app host
+
+`bin/cutover.sh` handles the one-time move from a stack that bundled its own nginx and
+renewed with certbot's standalone authenticator. Phases are invoked one at a time and
+never chain; everything before `swap` leaves the running site untouched.
+
+```bash
+rsync -av --exclude .git ~/docker/tezcat-edge/ user@tezcat.fr:opt/edge-src/
+# the app's own compose.yml, .env and nginx fragment go next to each other:
+scp deploy/compose.yml deploy/silence.conf user@tezcat.fr:opt/silence/
+ssh user@tezcat.fr 'cd ~/opt/edge-src && ./bin/cutover.sh preflight'
+```
+
+It exists because two orderings are easy to get wrong and expensive to get wrong:
+
+- **The certificate must precede the fragment.** nginx will not start with an
+  `ssl_certificate` path that does not exist, so the edge comes up on the `0*` config
+  alone — which needs only the apex certificate — serves the webroot challenge, and only
+  then takes the app fragment.
+- **Images must be pulled before the outage**, not during it. `stage` does that while the
+  old stack is still serving, which is the difference between a minute of downtime and
+  several.
+
 ## Host setup (once)
 
 ```bash
