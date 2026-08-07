@@ -15,7 +15,7 @@ services:
     networks:
       - edge
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost/ >/dev/null 2>&1 || [ $$? = 8 ]"]
+      test: ["CMD", "wget", "-qO-", "http://localhost/healthz"]
       interval: 30s
       timeout: 5s
       retries: 3
