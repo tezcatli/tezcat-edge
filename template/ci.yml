@@ -1,0 +1,91 @@
+# Template — copy to your app repo as .github/workflows/ci.yml and replace
+# `myapp`. test → build → deploy.
+#
+# Nothing is built on the production host: this pushes images to GHCR and the
+# host pulls them, which is what makes the deployed artifact immutable,
+# identical to what the tests ran against, and rollback-able by re-pinning a tag.
+
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Not cancel-in-progress: interrupting a job halfway through starting containers
+# on the host is the failure this exists to prevent.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}/myapp
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Tests
+        run: ./run-tests.sh          # ← your suite
+
+  build:
+    needs: test
+    # Pull requests get the test signal only; they must not publish images.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - name: backend
+            context: ./backend
+            file: ./backend/Dockerfile
+          - name: web
+            context: .
+            file: ./web/Dockerfile
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          push: true
+          tags: |
+            ${{ env.IMAGE_PREFIX }}-${{ matrix.name }}:${{ github.sha }}
+            ${{ env.IMAGE_PREFIX }}-${{ matrix.name }}:latest
+          # Links the GHCR package to this repo so it inherits the repo's
+          # access — that is what lets the host pull with a repo-scoped token
+          # instead of a long-lived PAT.
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+
+  deploy:
+    needs: build
+    # Only main deploys. A workflow_dispatch on a branch still builds and pushes
+    # images — useful for staging a cutover — but must never touch the host.
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    uses: tezcatli/tezcat-edge/.github/workflows/deploy-app.yml@main
+    with:
+      app: myapp                     # names ~/opt/myapp and conf.d/10-myapp.conf
+      image_tag: ${{ github.sha }}
+      health_service: backend        # must declare a healthcheck in compose.yml
+      compose_file: deploy/compose.yml
+      nginx_conf: deploy/myapp.conf
+      smoke_url: https://myapp.tezcat.fr/
+    # Required: this workflow declares no secrets of its own and reads the
+    # caller's DEPLOY_* values. See the tezcat-edge README for which four, and
+    # for the one that is easy to get wrong (DEPLOY_KNOWN_HOSTS).
+    secrets: inherit

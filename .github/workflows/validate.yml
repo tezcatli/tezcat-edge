@@ -39,3 +39,31 @@ jobs:
             -v "$PWD/conf.d:/etc/nginx/conf.d:ro" \
             -v "$PWD/certs:/etc/letsencrypt:ro" \
             nginx:alpine nginx -t
+
+      # The template is what a new app copies, so it has to load for real —
+      # against this repo's actual 0* config, not on its own.
+      - name: The template loads alongside the real edge config
+        run: |
+          set -euo pipefail
+          mkdir -p certs/live/myapp.tezcat.fr
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -keyout certs/live/myapp.tezcat.fr/privkey.pem \
+            -out    certs/live/myapp.tezcat.fr/fullchain.pem \
+            -subj   "/CN=myapp.tezcat.fr" 2>/dev/null
+          cp template/app.conf conf.d/10-myapp.conf
+          docker run --rm \
+            -v "$PWD/conf.d:/etc/nginx/conf.d:ro" \
+            -v "$PWD/certs:/etc/letsencrypt:ro" \
+            nginx:alpine nginx -t
+          rm conf.d/10-myapp.conf
+
+  contract-checker:
+    # The checker gates every app deploy, so a regression in it either blocks
+    # good deploys or waves bad ones through. Its self-test breaks each rule in
+    # turn and asserts it is caught.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: check-app.sh self-test
+        run: ./bin/test-check-app.sh

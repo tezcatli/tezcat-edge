@@ -79,6 +79,27 @@ jobs:
             test -f "$NGINX_CONF_SRC" || { echo "::error::no nginx fragment at $NGINX_CONF_SRC"; exit 1; }
           fi
 
+      # The contract is enforced here rather than described somewhere and hoped
+      # for. Every rule it checks fails *in production, later, and misleadingly*
+      # — an alias collision as intermittent cross-app 502s, a literal
+      # proxy_pass as the whole edge refusing to start on some future restart.
+      # Catching them before anything is shipped is the only point at which the
+      # feedback is cheap.
+      - name: Check the app against the edge contract
+        uses: actions/checkout@v5
+        with:
+          repository: tezcatli/tezcat-edge
+          ref: main
+          path: .tezcat-edge
+
+      - name: Run contract checks
+        run: |
+          set -euo pipefail
+          python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
+          args=(--app "$APP" --compose "$COMPOSE_FILE_SRC" --health-service "$HEALTH_SERVICE")
+          [ -n "$NGINX_CONF_SRC" ] && args+=(--conf "$NGINX_CONF_SRC")
+          .tezcat-edge/bin/check-app.sh "${args[@]}"
+
       - name: Install SSH key
         run: |
           set -euo pipefail

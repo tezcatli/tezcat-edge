@@ -1,0 +1,79 @@
+# Template — copy to your app repo as deploy/compose.yml and replace `myapp`.
+#
+# Lands on the host at ~/opt/<app>/compose.yml, where the compose project name
+# comes from the directory basename. That name prefixes the volumes, so renaming
+# the directory later orphans your data — pick it once.
+#
+# `bin/check-app.sh` in tezcat-edge enforces everything marked REQUIRED below,
+# and the deploy runs it before shipping anything.
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  backend:
+    # REQUIRED: the tag comes from a sibling .env the deploy writes. A floating
+    # tag like :latest cannot be rolled back to, and rollback here is just
+    # re-pinning IMAGE_TAG and running `up -d`.
+    image: ghcr.io/tezcatli/myapp-backend:${IMAGE_TAG:?IMAGE_TAG is required — set it in .env}
+    restart: unless-stopped
+    env_file:
+      # Created once on the host, by hand. The pipeline never ships it.
+      - path: ./backend_secrets.env
+        required: true
+    volumes:
+      - backend_data:/data
+    # REQUIRED on whichever service the deploy gates on (its `health_service`
+    # input). Without it the gate has nothing to wait for and reports success
+    # the moment the container is created — a green deploy of a dead app.
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8000/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    logging: *logging
+    networks:
+      # Intra-app traffic stays off the shared network.
+      default:
+      edge:
+        # REQUIRED, and the least obvious rule here. Compose *also* publishes
+        # the bare service name as an alias, so if another app has a service
+        # called `backend` too, both answer to `backend` on this network and
+        # Docker round-robins between them: one app's requests land in the
+        # other, intermittently, with nothing in the logs to say why. Route to
+        # the prefixed alias and only ever to that.
+        aliases: [myapp-backend]
+
+  web:
+    image: ghcr.io/tezcatli/myapp-web:${IMAGE_TAG:?IMAGE_TAG is required — set it in .env}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    logging: *logging
+    networks:
+      edge:
+        aliases: [myapp-web]
+
+volumes:
+  backend_data:
+
+networks:
+  default:
+  edge:
+    # REQUIRED: external, and named exactly `edge`. Without `external: true`
+    # compose creates its own private network of the same name, the edge cannot
+    # see the app, and every route 502s.
+    name: edge
+    external: true
+
+# Deliberately absent: `ports:`. The app is reached only through the edge.
+# Publishing a port would race the edge for :443 and bypass TLS, the security
+# headers and the routing in one go.

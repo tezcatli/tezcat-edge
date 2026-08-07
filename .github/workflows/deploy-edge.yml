@@ -1,0 +1,94 @@
+name: Deploy the edge
+
+# The counterpart to deploy-app.yml, for this repo's own files.
+#
+# It exists because its absence caused a real incident: the ownership table in
+# the README said `0*.conf` was deployed by workflow_dispatch, no such workflow
+# existed, and a committed change to the apex redirect sat undeployed while the
+# live site served the old behaviour. Documentation that describes a mechanism
+# nobody built is worse than documentation that admits the gap.
+#
+# Manual on purpose. The edge changes rarely, and a change here affects every
+# app on the host at once.
+
+on:
+  workflow_dispatch:
+    inputs:
+      restart:
+        description: 'Recreate the container (needed only for compose.yaml changes — briefly drops every app)'
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-production      # shared with the apps: never reconfigure mid-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      TARGET: ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Validate the config before it can reach the host
+        run: |
+          set -euo pipefail
+          # Only the apex certificate is referenced by 0*, and a throwaway is
+          # enough — nothing here validates trust, only that nginx will load it.
+          mkdir -p certs/live/tezcat.fr
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -keyout certs/live/tezcat.fr/privkey.pem \
+            -out    certs/live/tezcat.fr/fullchain.pem -subj "/CN=tezcat.fr" 2>/dev/null
+          docker run --rm \
+            -v "$PWD/conf.d:/etc/nginx/conf.d:ro" \
+            -v "$PWD/certs:/etc/letsencrypt:ro" \
+            nginx:alpine nginx -t
+
+      - name: Install SSH key
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Ship edge-owned files only
+        run: |
+          set -euo pipefail
+          ssh "$TARGET" "mkdir -p ~/opt/edge/conf.d/snippets ~/opt/edge/certbot"
+          # Deliberately file-by-file, and deliberately no --delete: conf.d/ has
+          # two writers. Every 1*.conf there belongs to an app's own pipeline,
+          # and deleting them would 502 every app until each redeployed.
+          scp -q compose.yaml            "$TARGET:opt/edge/compose.yaml"
+          scp -q conf.d/0*.conf          "$TARGET:opt/edge/conf.d/"
+          scp -q conf.d/snippets/*.inc   "$TARGET:opt/edge/conf.d/snippets/"
+
+      - name: Show what the app fragments look like after the sync
+        run: |
+          # A visible assertion that the apps' files survived. If this list is
+          # ever empty, something started deleting across conf.d/.
+          ssh "$TARGET" "ls -1 ~/opt/edge/conf.d/1*.conf 2>/dev/null || echo '(no app fragments — expected at least one)'"
+
+      - name: Recreate the container
+        if: inputs.restart
+        run: ssh "$TARGET" "cd ~/opt/edge && docker compose -f compose.yaml up -d"
+
+      - name: Validate on the host, then reload
+        run: |
+          set -euo pipefail
+          # Test against the *assembled* config — this repo's files plus every
+          # app fragment — because that combination is what actually runs, and
+          # it is not reproducible in CI.
+          ssh "$TARGET" "docker exec edge-nginx nginx -t && docker kill -s HUP edge-nginx"
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          curl -fsS --retry 3 --retry-delay 2 --max-time 20 -o /dev/null https://tezcat.fr/ || \
+            curl -fsS --retry 2 --max-time 20 -o /dev/null -w '%{http_code}\n' https://tezcat.fr/
+          # The apex redirects, so a 3xx is the healthy answer; -f alone would
+          # not distinguish that from a failure, hence the fallback above.
+          ssh "$TARGET" "docker inspect edge-nginx --format 'edge: {{.State.Health.Status}}'"
