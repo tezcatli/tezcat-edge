@@ -1,0 +1,41 @@
+name: Validate
+
+# A broken edge config takes down every app at once, so it gets checked before
+# it can reach the host. App fragments live in their own repos and are not
+# validated here; the deploy path runs `nginx -t` on the real, assembled config
+# before signalling a reload, which covers them.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  nginx-config:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Fabricate the certificates the config references
+        run: |
+          set -euo pipefail
+          # nginx refuses to start when an ssl_certificate path is missing, so a
+          # config test needs *something* at each referenced path. Self-signed
+          # throwaways are enough — nothing here validates trust.
+          for host in tezcat.fr; do
+            mkdir -p "certs/live/$host"
+            openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+              -keyout "certs/live/$host/privkey.pem" \
+              -out    "certs/live/$host/fullchain.pem" \
+              -subj   "/CN=$host" 2>/dev/null
+          done
+
+      - name: nginx -t
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD/conf.d:/etc/nginx/conf.d:ro" \
+            -v "$PWD/certs:/etc/letsencrypt:ro" \
+            nginx:alpine nginx -t

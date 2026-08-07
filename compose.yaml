@@ -1,0 +1,34 @@
+services:
+  nginx:
+    image: nginx:alpine
+    # Deliberate: the certbot deploy hook (renewal-hooks/deploy/reload-edge.sh)
+    # signals this container by name. It is the one place that coupling lives.
+    container_name: edge-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./conf.d:/etc/nginx/conf.d:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - ./certbot:/var/www/certbot
+    networks:
+      - edge
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost/ >/dev/null 2>&1 || [ $$? = 8 ]"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  # Created once, out of band: docker network create edge
+  # Apps join it from their own compose projects; see README.
+  edge:
+    name: edge
+    external: true

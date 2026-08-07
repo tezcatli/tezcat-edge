@@ -1,0 +1,169 @@
+name: Deploy app to the edge
+
+# Reusable deploy for any app that satisfies the contract in README.md.
+# Callers do:
+#
+#   deploy:
+#     needs: build
+#     if: github.event_name != 'pull_request'
+#     uses: tezcatli/tezcat-edge/.github/workflows/deploy-app.yml@main
+#     with:
+#       app: silence
+#       image_tag: ${{ github.sha }}
+#       smoke_url: https://ludo.tezcat.fr/silence/
+#     secrets: inherit
+#
+# `secrets: inherit` is required — this workflow declares no secrets of its own
+# and reads DEPLOY_* plus the caller's GITHUB_TOKEN straight from the caller.
+
+on:
+  workflow_call:
+    inputs:
+      app:
+        description: 'App slug. Names ~/opt/<app>, conf.d/10-<app>.conf and the compose project.'
+        required: true
+        type: string
+      image_tag:
+        description: 'Image tag to deploy. Normally github.sha.'
+        required: true
+        type: string
+      smoke_url:
+        description: 'URL fetched from the runner once deployed. Must return 2xx.'
+        required: true
+        type: string
+      health_service:
+        description: 'Compose service whose healthcheck gates the deploy.'
+        required: false
+        default: backend
+        type: string
+      compose_file:
+        description: 'Path in the caller repo to the compose file to ship.'
+        required: false
+        default: deploy/compose.yml
+        type: string
+      nginx_conf:
+        description: 'Path in the caller repo to the edge fragment. Empty to skip.'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
+    env:
+      # Every input reaches the shell through the environment rather than by
+      # being interpolated into the script text, so a caller cannot inject shell.
+      APP: ${{ inputs.app }}
+      IMAGE_TAG: ${{ inputs.image_tag }}
+      SMOKE_URL: ${{ inputs.smoke_url }}
+      HEALTH_SERVICE: ${{ inputs.health_service }}
+      COMPOSE_FILE_SRC: ${{ inputs.compose_file }}
+      NGINX_CONF_SRC: ${{ inputs.nginx_conf }}
+      TARGET: ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Validate inputs
+        run: |
+          set -euo pipefail
+          case "$APP" in
+            ''|*[!a-z0-9-]*) echo "::error::app must match [a-z0-9-]+, got '$APP'"; exit 1 ;;
+          esac
+          test -f "$COMPOSE_FILE_SRC" || { echo "::error::no compose file at $COMPOSE_FILE_SRC"; exit 1; }
+          if [ -n "$NGINX_CONF_SRC" ]; then
+            test -f "$NGINX_CONF_SRC" || { echo "::error::no nginx fragment at $NGINX_CONF_SRC"; exit 1; }
+          fi
+
+      - name: Install SSH key
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          # printf, not echo: a secret stored without a trailing newline yields an
+          # unusable key file, and the failure looks like a permissions problem.
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          # Pinned, not ssh-keyscan. Keyscan re-trusts whatever answers DNS on
+          # every run and then hands it the deploy key.
+          printf '%s\n' "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Ship compose file and edge fragment
+        run: |
+          set -euo pipefail
+          ssh "$TARGET" "mkdir -p ~/opt/'$APP'"
+          scp -q "$COMPOSE_FILE_SRC" "$TARGET:opt/$APP/compose.yml"
+          if [ -n "$NGINX_CONF_SRC" ]; then
+            scp -q "$NGINX_CONF_SRC" "$TARGET:opt/edge/conf.d/10-$APP.conf"
+          fi
+
+      - name: Pull and start
+        run: |
+          set -euo pipefail
+          ssh "$TARGET" "cd ~/opt/'$APP' && printf 'IMAGE_TAG=%s\n' '$IMAGE_TAG' > .env"
+          # Token over stdin, never argv — argv is world-readable in the remote
+          # process list for as long as the command runs.
+          printf '%s' "${{ secrets.GITHUB_TOKEN }}" \
+            | ssh "$TARGET" "docker login ghcr.io -u '${{ github.actor }}' --password-stdin"
+          ssh "$TARGET" "APP='$APP' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd ~/opt/"$APP"
+          docker compose -f compose.yml pull
+          docker compose -f compose.yml up -d --remove-orphans
+          REMOTE
+
+      - name: Reload the edge
+        if: inputs.nginx_conf != ''
+        run: |
+          set -euo pipefail
+          # Validate before signalling. A bad fragment must fail this deploy, not
+          # the whole edge: nginx -t is what keeps one app's typo from 502-ing
+          # every other app on the host.
+          ssh "$TARGET" "docker exec edge-nginx nginx -t && docker kill -s HUP edge-nginx"
+
+      - name: Wait for health
+        run: |
+          set -euo pipefail
+          ssh "$TARGET" "APP='$APP' SVC='$HEALTH_SERVICE' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd ~/opt/"$APP"
+          cid=$(docker compose -f compose.yml ps -q "$SVC")
+          if [ -z "$cid" ]; then
+            echo "no container for service '$SVC'"
+            docker compose -f compose.yml ps
+            exit 1
+          fi
+          # 30 x 5s = 150s, sized to a start_period:20s interval:30s retries:3
+          # healthcheck: healthy lands at ~20-50s, unhealthy is declared at ~110s.
+          for _ in $(seq 1 30); do
+            s=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck:{{.State.Status}}{{end}}' "$cid")
+            case "$s" in
+              healthy)              echo "healthy"; exit 0 ;;
+              no-healthcheck:running) echo "::warning::$SVC has no healthcheck; accepting 'running'"; exit 0 ;;
+              unhealthy)            break ;;
+            esac
+            sleep 5
+          done
+          echo "--- $SVC did not become healthy (last status: ${s:-unknown}) ---"
+          docker compose -f compose.yml logs --tail=100 "$SVC"
+          exit 1
+          REMOTE
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          # The only end-to-end check available from outside: it proves DNS, TLS,
+          # the edge fragment and the app container are all working together.
+          curl -fsS --retry 3 --retry-delay 2 --max-time 20 -o /dev/null "$SMOKE_URL"
+
+      - name: Prune superseded images
+        if: always()
+        run: ssh "$TARGET" "docker image prune -f" || true
+
+      - name: Log out of the registry
+        if: always()
+        run: ssh "$TARGET" "docker logout ghcr.io" || true
