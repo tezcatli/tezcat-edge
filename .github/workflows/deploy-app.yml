@@ -144,7 +144,7 @@ jobs:
           # Validate before signalling. A bad fragment must fail this deploy, not
           # the whole edge: nginx -t is what keeps one app's typo from 502-ing
           # every other app on the host.
-          ssh "$TARGET" "docker exec edge-nginx nginx -t && docker kill -s HUP edge-nginx"
+          ssh "$TARGET" "docker exec edge-nginx nginx -t && docker exec edge-nginx nginx -s reload"
 
       - name: Wait for health
         run: |

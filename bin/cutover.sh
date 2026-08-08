@@ -185,7 +185,7 @@ phase_swap() {
   cp "$APP_DIR/silence.conf" "$EDGE_DIR/conf.d/10-$APP.conf" 2>/dev/null \
     || die "expected $APP_DIR/silence.conf (scp deploy/silence.conf there first)"
   docker exec edge-nginx nginx -t || die "fragment does not pass nginx -t; site is still up on the 0* config"
-  docker kill -s HUP edge-nginx >/dev/null
+  docker exec edge-nginx nginx -s reload >/dev/null
   ok "fragment installed, edge reloaded"
 
   step "Outage over. Next: ./bin/cutover.sh verify"
@@ -221,7 +221,7 @@ phase_certs() {
   # One hook for every certificate. A reload, never a restart: a reload that
   # fails leaves nginx serving the certificate it already has, where a failed
   # restart would take every app on the host down at once.
-  printf '#!/bin/sh\ndocker kill -s HUP %s\n' "$EDGE_CONTAINER" \
+  printf '#!/bin/sh\ndocker exec %s nginx -s reload\n' "$EDGE_CONTAINER" \
     | sudo tee /etc/letsencrypt/renewal-hooks/deploy/reload-edge.sh >/dev/null
   sudo chmod +x /etc/letsencrypt/renewal-hooks/deploy/reload-edge.sh
   ok "deploy hook installed"

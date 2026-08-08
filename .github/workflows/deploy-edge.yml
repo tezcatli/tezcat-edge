@@ -103,7 +103,7 @@ jobs:
           # Test against the *assembled* config — this repo's files plus every
           # app fragment — because that combination is what actually runs, and
           # it is not reproducible in CI.
-          ssh "$TARGET" "docker exec edge-nginx nginx -t && docker kill -s HUP edge-nginx"
+          ssh "$TARGET" "docker exec edge-nginx nginx -t && docker exec edge-nginx nginx -s reload"
 
       - name: Smoke test
         run: |

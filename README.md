@@ -117,6 +117,7 @@ That is why they are checked mechanically rather than only described.
 | HSTS and friends silently missing on some routes | `add_header` does not merge across levels — a location that sets any header drops every inherited one | Include `snippets/security-headers.inc` at **server** level, and re-include it in any location that adds headers of its own |
 | Deploy green, app dead | The gated service has no healthcheck, so the gate passed on container creation | Give `health_service` a real healthcheck |
 | Rollback impossible | Image pinned to `:latest` | Use `${IMAGE_TAG:?}`; rollback is re-pinning `.env` |
+| **Everything is down after a host reboot**, and only the edge failed to come back | Something ran `docker kill -s HUP edge-nginx`. `docker kill` sets the container's `HasBeenManuallyStopped` flag **even when the signal does not terminate it**, and `restart: unless-stopped` then refuses to restart it on boot | Reload with `docker exec edge-nginx nginx -s reload`. Never `docker kill`, anywhere — including the certbot deploy hook, which runs unattended |
 
 ---
 
@@ -170,7 +171,7 @@ and **no `pre_hook` / `post_hook`**. Reloading is one shared deploy hook,
 
 ```sh
 #!/bin/sh
-docker kill -s HUP edge-nginx
+docker exec edge-nginx nginx -s reload
 ```
 
 A reload, not a restart: if it fails, nginx keeps serving the certificate it already has
@@ -201,7 +202,7 @@ of downtime and several.
 docker compose -f ~/opt/edge/compose.yaml ps
 
 # Apply a config change (never restart — reload)
-docker exec edge-nginx nginx -t && docker kill -s HUP edge-nginx
+docker exec edge-nginx nginx -t && docker exec edge-nginx nginx -s reload
 
 # Which apps are on the network
 docker network inspect edge --format '{{range .Containers}}{{.Name}} {{end}}'
