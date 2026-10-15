@@ -1,0 +1,13 @@
+# Weekly. The edge fronts every app, so its nginx is the one image that must not
+# go stale; see README → Updating nginx for how a merged bump reaches the host.
+version: 2
+updates:
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule: { interval: weekly }
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }
+    groups:
+      actions: { update-types: [minor, patch, major] }
