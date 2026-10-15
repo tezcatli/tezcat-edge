@@ -1,6 +1,10 @@
 services:
   nginx:
-    image: nginx:alpine
+    # Pinned to nginx's stable line, not the floating `alpine`: the tag names
+    # what runs, the CI checks validate the config with this same image, and a
+    # new stable line arrives as a Dependabot PR. Patch releases within the line
+    # come in when deploy-edge.yml recreates the container (it pulls first).
+    image: nginx:1.30-alpine
     # Deliberate: the certbot deploy hook (renewal-hooks/deploy/reload-edge.sh)
     # signals this container by name. It is the one place that coupling lives.
     container_name: edge-nginx

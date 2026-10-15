@@ -121,7 +121,7 @@ phase_prepare() {
   docker run --rm \
     -v "$EDGE_DIR/conf.d:/etc/nginx/conf.d:ro" \
     -v /etc/letsencrypt:/etc/letsencrypt:ro \
-    nginx:alpine nginx -t >/dev/null 2>&1 \
+    "$(sed -n 's/^ *image: *//p' "$EDGE_DIR/compose.yaml" | head -1)" nginx -t >/dev/null 2>&1 \
     || die "edge config does not pass nginx -t"
   ok "edge config passes nginx -t"
 

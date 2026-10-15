@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
     inputs:
       restart:
-        description: 'Recreate the container (needed only for compose.yaml changes — briefly drops every app)'
+        description: 'Recreate the container (needed for compose.yaml changes, nginx updates included — briefly drops every app)'
         type: boolean
         default: false
 
@@ -56,6 +56,7 @@ jobs:
       - name: Validate the config before it can reach the host
         run: |
           set -euo pipefail
+          EDGE_IMAGE=$(sed -n 's/^ *image: *//p' compose.yaml | head -1)   # the image the host runs
           # Only the apex certificate is referenced by 0*, and a throwaway is
           # enough — nothing here validates trust, only that nginx will load it.
           mkdir -p certs/live/tezcat.fr
@@ -65,7 +66,7 @@ jobs:
           docker run --rm \
             -v "$PWD/conf.d:/etc/nginx/conf.d:ro" \
             -v "$PWD/certs:/etc/letsencrypt:ro" \
-            nginx:alpine nginx -t
+            "$EDGE_IMAGE" nginx -t
 
       - name: Install SSH key
         run: |
@@ -95,7 +96,9 @@ jobs:
 
       - name: Recreate the container
         if: inputs.restart
-        run: ssh "$TARGET" "cd ~/opt/edge && docker compose -f compose.yaml up -d"
+        # Pull first: `up -d` alone keeps whatever image the host already has, so
+        # the edge never received an nginx update.
+        run: ssh "$TARGET" "cd ~/opt/edge && docker compose -f compose.yaml pull && docker compose -f compose.yaml up -d"
 
       - name: Validate on the host, then reload
         run: |

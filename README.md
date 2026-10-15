@@ -3,8 +3,11 @@
 The shared nginx reverse proxy on `tezcat.fr`. It owns `:80` and `:443`, terminates TLS, and
 routes each hostname to an application running in its own compose project.
 
-It builds no image — the container is stock `nginx:alpine` with `conf.d/` bind-mounted, so
-changing routing is editing a file and reloading, not building and shipping.
+It builds no image — the container is stock nginx (the stable line pinned in `compose.yaml`) with
+`conf.d/` bind-mounted, so changing routing is editing a file and reloading, not building and shipping.
+**Updating nginx**: Dependabot opens a PR when a new stable line ships (`validate.yml` checks the
+config against it); merge it, then run `deploy-edge.yml` with `restart: true`, which pulls the image —
+that also picks up patch releases within the line. Recreating drops every app for a few seconds.
 
 ```
   :80/:443 ──▶ edge-nginx                                   ~/opt/edge/
